@@ -18,20 +18,20 @@ type Handler interface {
 
 type DirectiveHandler interface {
 	Handler
-	Directive() error
+	Directive([]any) error
 }
 
 func Process(r io.Reader, h Handler) error {
-	return nil
+	p, err := createParser(r, h)
+	if err != nil {
+		return err
+	}
+	return p.parse()
 }
 
 func Decode(r io.Reader) ([]any, error) {
 	var bh baseHandler
-	p, err := createParser(r, &bh)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.parse(); err != nil {
+	if err := Process(r, &bh); err != nil {
 		return nil, err
 	}
 	return bh.Result(), nil
@@ -40,6 +40,11 @@ func Decode(r io.Reader) ([]any, error) {
 type baseHandler struct {
 	expr   [][]any
 	result []any
+}
+
+func (h *baseHandler) Clear() {
+	h.expr = h.expr[:0]
+	h.result = h.result[:0]
 }
 
 func (h *baseHandler) Result() []any {
@@ -68,12 +73,13 @@ func (h *baseHandler) EndList() error {
 	return nil
 }
 
-func (h *baseHandler) Atom(atom any) error {
+func (h *baseHandler) Atom(expr any) error {
 	if len(h.expr) == 0 {
-		return fmt.Errorf("atom outside of a list")
+		h.result = append(h.result, expr)
+		return nil
 	}
 	i := len(h.expr) - 1
-	h.expr[i] = append(h.expr[i], atom)
+	h.expr[i] = append(h.expr[i], expr)
 	return nil
 }
 
@@ -132,13 +138,36 @@ func (p *parser) parseDirective() error {
 	if !ok {
 		return nil
 	}
-	for p.is(tokDirective) {
+	for !p.done() {
+		p.skipComments()
+		if !p.is(tokDirective) {
+			break
+		}
 		p.next()
-		if err := dh.Directive(); err != nil {
+		expr, err := p.captureExpr()
+		if err != nil {
+			return err
+		}
+		if err := dh.Directive(expr); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (p *parser) captureExpr() ([]any, error) {
+	var (
+		old  = p.handle
+		next baseHandler
+	)
+	defer func() {
+		p.handle = old
+	}()
+	p.handle = &next
+	if err := p.parseExpr(); err != nil {
+		return nil, err
+	}
+	return next.Result(), nil
 }
 
 func (p *parser) parseExpr() error {
