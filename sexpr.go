@@ -2,11 +2,14 @@ package sexpr
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"unicode/utf8"
 )
+
+var ErrSyntax = errors.New("invalid syntax")
 
 type Ident string
 
@@ -148,7 +151,14 @@ func (p *parser) parseDirective() error {
 		if err != nil {
 			return err
 		}
-		if err := dh.Directive(expr); err != nil {
+		if len(expr) != 1 {
+			return ErrSyntax
+		}
+		arr, ok := expr[0].([]any)
+		if !ok {
+			arr = []any{expr[0]}
+		}
+		if err := dh.Directive(arr); err != nil {
 			return err
 		}
 	}
