@@ -259,7 +259,7 @@ func (p *parser) next() {
 }
 
 func (p *parser) done() bool {
-	return p.scan.done()
+	return p.is(tokEof)
 }
 
 func (p *parser) skipComments() {
@@ -359,7 +359,26 @@ func (s *scanner) scanComment(tok *token) {
 func (s *scanner) scanString(tok *token) {
 	s.read()
 	for !s.done() && !isQuote(s.char) {
-		s.write()
+		if s.char == backslash {
+			switch c := s.peek() {
+			case quote:
+				s.writeRune(quote)
+			case backslash:
+				s.writeRune(backslash)
+			case 'n':
+				s.writeRune(nl)
+			case 'r':
+				s.writeRune(cr)
+			case 't':
+				s.writeRune(tab)
+			default:
+				tok.Type = Invalid
+				return
+			}
+			s.read()
+		} else {
+			s.write()
+		}
 		s.read()
 	}
 	tok.Type = tokString
@@ -500,6 +519,7 @@ const (
 	quote      = '"'
 	bang       = '!'
 	pound      = '#'
+	backslash  = '\\'
 )
 
 func isDirective(r, k rune) bool {
