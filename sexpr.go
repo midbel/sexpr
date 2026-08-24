@@ -360,7 +360,7 @@ func (s *scanner) scanString(tok *token) {
 	s.read()
 	for !s.done() && !isQuote(s.char) {
 		if s.char == backslash {
-			switch c := s.peek() {
+			switch c := s.peek(); c {
 			case quote:
 				s.writeRune(quote)
 			case backslash:
@@ -372,7 +372,7 @@ func (s *scanner) scanString(tok *token) {
 			case 't':
 				s.writeRune(tab)
 			default:
-				tok.Type = Invalid
+				tok.Type = tokInvalid
 				return
 			}
 			s.read()
