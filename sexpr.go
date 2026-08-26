@@ -191,12 +191,18 @@ func (p *parser) parseExpr() error {
 		err = p.parseSymbol()
 	case tokBoolean:
 		err = p.parseBool()
+	case tokVariable:
+		err = p.parseVariable()
 	case tokBegList:
 		err = p.parseList()
 	default:
 		err = fmt.Errorf("unexpected token type")
 	}
 	return err
+}
+
+func (p *Parser) parseVariable() error {
+	return nil
 }
 
 func (p *parser) parseNumber() error {
@@ -283,6 +289,7 @@ const (
 	tokEndList
 	tokComment
 	tokDirective
+	tokVariable
 	tokInvalid
 )
 
@@ -333,10 +340,28 @@ func (s *scanner) scan() token {
 		s.scanNumber(&tok)
 	case isDirective(s.char, s.peek()):
 		s.scanDirective(&tok)
+	case isVariable(s.char, s.peek()):
+		s.scanVariable(&tok)
 	default:
 		tok.Type = tokInvalid
 	}
 	return tok
+}
+
+func (s *scanner) scanVariable(tok *token) {
+	s.read()
+	s.read()
+	for !s.done() && s.char != rcurly {
+		s.write()
+		s.read()
+	}
+	tok.Literal = s.literal()
+	tok.Type = tokVariable
+	if s.char != rcurly {
+		tok.Type = tokInvalid
+	} else {
+		s.read()
+	}
 }
 
 func (s *scanner) scanDirective(tok *token) {
@@ -520,7 +545,14 @@ const (
 	bang       = '!'
 	pound      = '#'
 	backslash  = '\\'
+	dollar     = '$'
+	lcurly     = '{'
+	rcurly     = '}'
 )
+
+func isVariable(r, k rune) bool {
+	return r == dollar && r == lcurly
+}
 
 func isDirective(r, k rune) bool {
 	return r == pound && k == bang
