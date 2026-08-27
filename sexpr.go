@@ -13,6 +13,16 @@ var ErrSyntax = errors.New("invalid syntax")
 
 type Ident string
 
+type Resolver interface {
+	Resolve(string) (any, error)
+}
+
+type noopResolver struct {}
+
+func (noopResolver) Resolve(_ string) (any, error) {
+	return nil, nil
+}
+
 type Handler interface {
 	BeginList() error
 	EndList() error
@@ -24,8 +34,11 @@ type DirectiveHandler interface {
 	Directive([]any) error
 }
 
-func Process(r io.Reader, h Handler) error {
-	p, err := createParser(r, h)
+func Process(r io.Reader, h Handler, v Resolver) error {
+	if v == nil {
+		v = noopResolver{}
+	}
+	p, err := createParser(r, h, v)
 	if err != nil {
 		return err
 	}
@@ -33,8 +46,11 @@ func Process(r io.Reader, h Handler) error {
 }
 
 func Decode(r io.Reader) ([]any, error) {
-	var bh baseHandler
-	if err := Process(r, &bh); err != nil {
+	var (
+		bh baseHandler
+		nr noopResolver
+	)
+	if err := Process(r, &bh, nr); err != nil {
 		return nil, err
 	}
 	return bh.Result(), nil
@@ -99,19 +115,21 @@ type token struct {
 
 type parser struct {
 	handle Handler
+	resolver Resolver
 
 	scan *scanner
 	curr token
 	peek token
 }
 
-func createParser(r io.Reader, h Handler) (*parser, error) {
+func createParser(r io.Reader, h Handler, v Resolver) (*parser, error) {
 	scan, err := createScanner(r)
 	if err != nil {
 		return nil, err
 	}
 	p := &parser{
 		scan:   scan,
+		resolver: v,
 		handle: h,
 	}
 	p.next()
@@ -201,8 +219,13 @@ func (p *parser) parseExpr() error {
 	return err
 }
 
-func (p *Parser) parseVariable() error {
-	return nil
+func (p *parser) parseVariable() error {
+	val, err := p.resolver.Resolve(p.curr.Literal)
+	if err == nil {
+		err = p.handle.Atom(val)
+		p.next()
+	}
+	return err
 }
 
 func (p *parser) parseNumber() error {
