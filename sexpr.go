@@ -8,6 +8,7 @@ import (
 	"io"
 	"iter"
 	"strconv"
+	"time"
 	"unicode"
 )
 
@@ -226,12 +227,22 @@ func (p *parser) parseVariable() error {
 	return err
 }
 
-func (p *Parser) parseDate() error {
-	return nil
+func (p *parser) parseDate() error {
+	defer p.next()
+	val, err := time.Parse(time.DateOnly, p.curr.Literal)
+	if err == nil {
+		p.handle.Atom(val)
+	}
+	return err
 }
 
-func (p *Parser) parseDateTime() error {
-	return nil
+func (p *parser) parseDateTime() error {
+	defer p.next()
+	val, err := time.Parse(time.RFC3339, p.curr.Literal)
+	if err == nil {
+		p.handle.Atom(val)
+	}
+	return err
 }
 
 func (p *parser) parseNumber() error {
