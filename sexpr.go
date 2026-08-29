@@ -195,6 +195,10 @@ func (p *parser) captureExpr() ([]any, error) {
 func (p *parser) parseExpr() error {
 	var err error
 	switch p.curr.Type {
+	case TokDate:
+		err = p.parseDate()
+	case TokDateTime:
+		err = p.parseDateTime()
 	case TokFloat, TokInt:
 		err = p.parseNumber()
 	case TokString:
@@ -220,6 +224,14 @@ func (p *parser) parseVariable() error {
 		p.next()
 	}
 	return err
+}
+
+func (p *Parser) parseDate() error {
+	return nil
+}
+
+func (p *Parser) parseDateTime() error {
+	return nil
 }
 
 func (p *parser) parseNumber() error {
@@ -796,7 +808,7 @@ const (
 )
 
 func isVariable(r, k rune) bool {
-	return r == dollar && r == lcurly
+	return r == dollar && k == lcurly
 }
 
 func isDirective(r, k rune) bool {
