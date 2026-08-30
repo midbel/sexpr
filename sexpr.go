@@ -509,7 +509,7 @@ func (s *scanner) Scan() Token {
 		s.scanString(&tok)
 	case s.char == underscore || isLetter(s.char):
 		s.scanLiteral(&tok)
-	case s.char == minus || isDigit(s.char):
+	case isSign(s.char) || isDigit(s.char):
 		s.scanNumber(&tok)
 	case isDirective(s.char, s.peek()):
 		s.scanDirective(&tok)
@@ -517,12 +517,11 @@ func (s *scanner) Scan() Token {
 		s.scanVariable(&tok)
 	default:
 		tok.Type = TokInvalid
+		s.write()
 	}
 	if tok.Type == TokInvalid {
 		s.err = ErrInput
-		if tok.Literal == "" {
-			tok.Literal = s.literal()
-		}
+		tok.Literal = s.literal()
 	}
 	return tok
 }
@@ -674,25 +673,22 @@ func (s *scanner) scanOctal(tok *Token) {
 }
 
 func (s *scanner) scanDecimal(tok *Token) {
+	start := decimalStateNumber
 	if isSign(s.char) {
-		if s.char == minus {
-			s.write()
-		}
+		s.write()
 		s.advance()
-	}
-	if s.char == '0' && s.peek() == s.char {
-		tok.Type = TokInvalid
-		return
+		start = decimalStateSign
+	} else if s.char == '0' {
+		s.write()
+		s.advance()
+		start = decimalStateZero
 	}
 	until := func(char rune) bool {
 		return isBlank(char) || isComment(char) || isDelim(char)
 	}
-	reco := newDecimalNumberRecognizer(decimalStateNumber)
+	reco := newDecimalNumberRecognizer(start)
 	for !s.done() && !until(s.char) {
 		reco.transition(s.char)
-		if !reco.valid() {
-			break
-		}
 		if s.char != underscore {
 			s.write()
 		}
@@ -724,6 +720,7 @@ func (s *scanner) advance() {
 	c, _, err := s.input.ReadRune()
 	if err != nil {
 		s.err = err
+		s.char = 0
 		return
 	}
 	s.char = c
@@ -748,7 +745,7 @@ func (s *scanner) peek() rune {
 }
 
 func (s *scanner) done() bool {
-	return errors.Is(s.err, io.EOF)
+	return errors.Is(s.err, io.EOF) || s.char == 0
 }
 
 func (s *scanner) writeRune(r rune) {
@@ -979,13 +976,14 @@ func (r *decimalNumberRecognizer) transition(char rune) {
 
 func (r *decimalNumberRecognizer) valid() bool {
 	return r.state == decimalStateNumber ||
+		r.state == decimalStateZero ||
 		r.state == decimalStateFractionNumber ||
 		r.state == decimalStateExponentNumber
 }
 
 func (r *decimalNumberRecognizer) typeOf() Type {
 	switch r.state {
-	case decimalStateNumber:
+	case decimalStateNumber, decimalStateZero:
 		return TokInt
 	case decimalStateFractionNumber, decimalStateExponentNumber:
 		return TokFloat
