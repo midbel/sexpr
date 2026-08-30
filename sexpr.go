@@ -645,11 +645,8 @@ func (s *scanner) scanHexa(tok *Token) {
 		}
 		s.advance()
 	}
-	tok.Type = TokInt
+	tok.Type = reco.typeOf()
 	tok.Literal = s.literal()
-	if !reco.valid() {
-		tok.Type = TokInvalid
-	}
 }
 
 func (s *scanner) scanOctal(tok *Token) {
@@ -687,52 +684,22 @@ func (s *scanner) scanDecimal(tok *Token) {
 		tok.Type = TokInvalid
 		return
 	}
-	for !s.done() && isDigit(s.char) {
-		s.write()
+	until := func(char rune) bool {
+		return isBlank(char) || isComment(char) || isDelim(char)
+	}
+	reco := newDecimalNumberRecognizer(decimalStateNumber)
+	for !s.done() && !until(s.char) {
+		reco.transition(s.char)
+		if !reco.valid() {
+			break
+		}
+		if s.char != underscore {
+			s.write()
+		}
 		s.advance()
 	}
-	tok.Type = TokInt
+	tok.Type = reco.typeOf()
 	tok.Literal = s.literal()
-	if s.char == dot {
-		s.scanFraction(tok)
-	}
-	if s.char == 'e' || s.char == 'E' {
-		s.scanExponent(tok)
-	}
-}
-
-func (s *scanner) scanFraction(tok *Token) {
-	s.write()
-	s.advance()
-	if !isDigit(s.char) {
-		tok.Type = TokInvalid
-		return
-	}
-	for !s.done() && isDigit(s.char) {
-		s.write()
-		s.advance()
-	}
-	tok.Literal = s.literal()
-	tok.Type = TokFloat
-}
-
-func (s *scanner) scanExponent(tok *Token) {
-	s.write()
-	s.advance()
-	if isSign(s.char) {
-		s.write()
-		s.advance()
-	}
-	if !isDigit(s.char) {
-		tok.Type = TokInvalid
-		return
-	}
-	for !s.done() && isDigit(s.char) {
-		s.write()
-		s.advance()
-	}
-	tok.Literal = s.literal()
-	tok.Type = TokFloat
 }
 
 func (s *scanner) scanDelimiter(tok *Token) {
@@ -833,6 +800,10 @@ const (
 	rcurly     = '}'
 )
 
+func isDelim(r rune) bool {
+	return r == lparen || r == rparen
+}
+
 func isVariable(r, k rune) bool {
 	return r == dollar && k == lcurly
 }
@@ -892,6 +863,135 @@ func isSign(r rune) bool {
 type recognizer interface {
 	transition(rune)
 	valid() bool
+	typeOf() Type
+}
+
+type decimalNumberState uint8
+
+const (
+	decimalStateNumber decimalNumberState = iota
+	decimalStateUnderscore
+	decimalStateSign
+	decimalStateZero
+	decimalStateFraction
+	decimalStateFractionNumber
+	decimalStateFractionUnderscore
+	decimalStateExponent
+	decimalStateExponentNumber
+	decimalStateExponentSign
+	decimalStateExponentUnderscore
+	decimalStateInvalid
+)
+
+type decimalNumberRecognizer struct {
+	state decimalNumberState
+}
+
+func newDecimalNumberRecognizer(start decimalNumberState) recognizer {
+	return &decimalNumberRecognizer{
+		state: start,
+	}
+}
+
+func (r *decimalNumberRecognizer) transition(char rune) {
+	switch r.state {
+	case decimalStateInvalid:
+	case decimalStateNumber:
+		if char == underscore {
+			r.state = decimalStateUnderscore
+		} else if char == 'e' || char == 'E' {
+			r.state = decimalStateExponent
+		} else if char == dot {
+			r.state = decimalStateFraction
+		} else if !isDigit(char) {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateUnderscore:
+		if !isDigit(char) {
+			r.state = decimalStateInvalid
+		} else {
+			r.state = decimalStateNumber
+		}
+	case decimalStateSign:
+		if isDigit(char) && char != '0' {
+			r.state = decimalStateNumber
+		} else if char == '0' {
+			r.state = decimalStateZero
+		} else {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateZero:
+		if char == dot {
+			r.state = decimalStateFraction
+		} else if char == 'e' || char == 'E' {
+			r.state = decimalStateExponent
+		} else {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateFraction:
+		if isDigit(char) {
+			r.state = decimalStateFractionNumber
+		} else {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateFractionNumber:
+		if char == underscore {
+			r.state = decimalStateFractionUnderscore
+		} else if char == 'e' || char == 'E' {
+			r.state = decimalStateExponent
+		} else if !isDigit(char) {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateFractionUnderscore:
+		if isDigit(char) {
+			r.state = decimalStateFractionNumber
+		} else {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateExponent:
+		if isSign(char) {
+			r.state = decimalStateExponentSign
+		} else if isDigit(char) {
+			r.state = decimalStateExponentNumber
+		} else {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateExponentUnderscore:
+		if isDigit(char) {
+			r.state = decimalStateExponentNumber
+		} else {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateExponentSign:
+		if isDigit(char) {
+			r.state = decimalStateExponentNumber
+		} else {
+			r.state = decimalStateInvalid
+		}
+	case decimalStateExponentNumber:
+		if char == underscore {
+			r.state = decimalStateExponentUnderscore
+		} else if !isDigit(char) {
+			r.state = decimalStateInvalid
+		}
+	}
+}
+
+func (r *decimalNumberRecognizer) valid() bool {
+	return r.state == decimalStateNumber ||
+		r.state == decimalStateFractionNumber ||
+		r.state == decimalStateExponentNumber
+}
+
+func (r *decimalNumberRecognizer) typeOf() Type {
+	switch r.state {
+	case decimalStateNumber:
+		return TokInt
+	case decimalStateFractionNumber, decimalStateExponentNumber:
+		return TokFloat
+	default:
+		return TokInvalid
+	}
 }
 
 type baseNumberState uint8
@@ -929,6 +1029,15 @@ func (r *baseNumberRecognizer) transition(char rune) {
 		} else if !r.accept(char) {
 			r.state = baseStateInvalid
 		}
+	}
+}
+
+func (r *baseNumberRecognizer) typeOf() Type {
+	switch r.state {
+	case baseStateNumber:
+		return TokInt
+	default:
+		return TokInvalid
 	}
 }
 
