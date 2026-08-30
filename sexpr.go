@@ -488,7 +488,7 @@ func (s *scanner) Err() error {
 
 func (s *scanner) Scan() Token {
 	var tok Token
-	if s.err != nil {
+	if s.err != nil && !s.done() {
 		tok.Type = TokInvalid
 		return tok
 	}
@@ -597,7 +597,7 @@ func (s *scanner) scanString(tok *Token) {
 }
 
 func (s *scanner) scanLiteral(tok *Token) {
-	for !s.done() && isAlpha(s.char) {
+	for !s.done() && (isAlpha(s.char) || s.char == minus) {
 		s.write()
 		s.advance()
 	}
@@ -632,16 +632,24 @@ func (s *scanner) scanHexa(tok *Token) {
 	s.advance()
 	s.write()
 	s.advance()
+
 	if !isHexa(s.char) {
 		tok.Type = TokInvalid
 		return
 	}
-	for !s.done() && isHexa(s.char) {
-		s.write()
+	reco := newBaseNumberRecognizer(isHexa)
+	for !s.done() && (isHexa(s.char) || s.char == underscore) {
+		reco.transition(s.char)
+		if s.char != underscore {
+			s.write()
+		}
 		s.advance()
 	}
 	tok.Type = TokInt
 	tok.Literal = s.literal()
+	if !reco.valid() {
+		tok.Type = TokInvalid
+	}
 }
 
 func (s *scanner) scanOctal(tok *Token) {
@@ -653,12 +661,19 @@ func (s *scanner) scanOctal(tok *Token) {
 		tok.Type = TokInvalid
 		return
 	}
-	for !s.done() && isOctal(s.char) {
-		s.write()
+	reco := newBaseNumberRecognizer(isHexa)
+	for !s.done() && (isOctal(s.char) || s.char == underscore) {
+		reco.transition(s.char)
+		if s.char != underscore {
+			s.write()
+		}
 		s.advance()
 	}
 	tok.Type = TokInt
 	tok.Literal = s.literal()
+	if !reco.valid() {
+		tok.Type = TokInvalid
+	}
 }
 
 func (s *scanner) scanDecimal(tok *Token) {
@@ -872,4 +887,51 @@ func isNL(r rune) bool {
 
 func isSign(r rune) bool {
 	return r == plus || r == minus
+}
+
+type recognizer interface {
+	transition(rune)
+	valid() bool
+}
+
+type baseNumberState uint8
+
+const (
+	baseStateNumber baseNumberState = iota
+	baseStateUnderscore
+	baseStateInvalid
+)
+
+type baseNumberRecognizer struct {
+	state  baseNumberState
+	accept func(rune) bool
+}
+
+func newBaseNumberRecognizer(accept func(rune) bool) recognizer {
+	return &baseNumberRecognizer{
+		state:  baseStateNumber,
+		accept: accept,
+	}
+}
+
+func (r *baseNumberRecognizer) transition(char rune) {
+	switch r.state {
+	case baseStateInvalid:
+	case baseStateUnderscore:
+		if r.accept(char) {
+			r.state = baseStateNumber
+		} else {
+			r.state = baseStateInvalid
+		}
+	case baseStateNumber:
+		if char == underscore {
+			r.state = baseStateUnderscore
+		} else if !r.accept(char) {
+			r.state = baseStateInvalid
+		}
+	}
+}
+
+func (r *baseNumberRecognizer) valid() bool {
+	return r.state == baseStateNumber
 }
