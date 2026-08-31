@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 )
@@ -19,14 +21,17 @@ var (
 
 type Ident string
 
-type Resolver interface {
-	Resolve(string) (any, error)
+type Environment interface {
+	FileResolver
+	Resolver
 }
 
-type noopResolver struct{}
+type FileResolver interface {
+	Open(string) (io.ReadCloser, error)
+}
 
-func (noopResolver) Resolve(_ string) (any, error) {
-	return nil, nil
+type Resolver interface {
+	Resolve(string) (any, error)
 }
 
 type Handler interface {
@@ -42,7 +47,7 @@ type DirectiveHandler interface {
 
 func Process(r io.Reader, h Handler, v Resolver) error {
 	if v == nil {
-		v = noopResolver{}
+		v = envResolver{}
 	}
 	p, err := createParser(r, h, v)
 	if err != nil {
@@ -54,7 +59,7 @@ func Process(r io.Reader, h Handler, v Resolver) error {
 func Decode(r io.Reader) ([]any, error) {
 	var (
 		bh baseHandler
-		nr noopResolver
+		nr envResolver
 	)
 	if err := Process(r, &bh, nr); err != nil {
 		return nil, err
@@ -108,9 +113,26 @@ func (h *baseHandler) Atom(expr any) error {
 	return nil
 }
 
+type environment struct {
+	Resolver
+	FileResolver
+}
+
+type envResolver struct{}
+
+func (envResolver) Resolve(ident string) (any, error) {
+	return os.Getenv(ident), nil
+}
+
+type localFileResolver struct{}
+
+func (localFileResolver) Open(file string) (io.ReadCloser, error) {
+	return os.Open(file)
+}
+
 type parser struct {
-	handle   Handler
-	resolver Resolver
+	handle Handler
+	env    Environment
 
 	scan *scanner
 	curr Token
@@ -122,10 +144,19 @@ func createParser(r io.Reader, h Handler, v Resolver) (*parser, error) {
 	if err != nil {
 		return nil, err
 	}
+	var env Environment
+	if v, ok := v.(Environment); ok {
+		env = v
+	} else if _, ok := v.(FileResolver); !ok {
+		env = environment{
+			Resolver:     v,
+			FileResolver: localFileResolver{},
+		}
+	}
 	p := &parser{
-		scan:     scan,
-		resolver: v,
-		handle:   h,
+		scan:   scan,
+		env:    env,
+		handle: h,
 	}
 	p.next()
 	p.next()
@@ -219,7 +250,7 @@ func (p *parser) parseExpr() error {
 }
 
 func (p *parser) parseVariable() error {
-	val, err := p.resolver.Resolve(p.curr.Literal)
+	val, err := p.env.Resolve(p.curr.Literal)
 	if err == nil {
 		err = p.handle.Atom(val)
 		p.next()
@@ -283,6 +314,9 @@ func (p *parser) parseBool() error {
 
 func (p *parser) parseList() error {
 	p.next()
+	if p.is(TokSymbol) && p.curr.Literal == "include" {
+		return p.parseInclude()
+	}
 	if err := p.handle.BeginList(); err != nil {
 		return err
 	}
@@ -297,6 +331,38 @@ func (p *parser) parseList() error {
 	}
 	p.next()
 	return p.handle.EndList()
+}
+
+func (p *parser) parseInclude() error {
+	p.next()
+	for !p.done() && !p.is(TokEndList) {
+		if !p.is(TokString) {
+			return fmt.Errorf("string expected")
+		}
+		if err := p.includeFile(p.curr.Literal); err != nil {
+			return err
+		}
+		p.next()
+	}
+	if !p.is(TokEndList) {
+		return fmt.Errorf("expected closing parenthesis at end of list")
+	}
+	p.next()
+	return nil
+}
+
+func (p *parser) includeFile(file string) error {
+	r, err := p.env.Open(file)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	sub, err := createParser(r, p.handle, p.env)
+	if err != nil {
+		return err
+	}
+	return sub.parse()
 }
 
 func (p *parser) next() {
@@ -316,6 +382,159 @@ func (p *parser) skipComments() {
 
 func (p *parser) is(r Type) bool {
 	return p.curr.Type == r
+}
+
+var units = map[string]float64{
+	"k":  1000,
+	"ko": 1000,
+	"kb": 1024,
+	"m":  1000 * 1000,
+	"mo": 1000 * 1000,
+	"mb": 1024 * 1024,
+	"g":  1000 * 1000 * 1000,
+	"go": 1000 * 1000 * 1000,
+	"gb": 1024 * 1024 * 1024,
+	"t":  1000 * 1000 * 1000 * 1000,
+	"to": 1000 * 1000 * 1000 * 1000,
+	"tb": 1024 * 1024 * 1024 * 1024,
+}
+
+func splitUnit(val string) (string, float64, error) {
+	ix := strings.IndexFunc(val, unicode.IsLetter)
+	if ix < 0 {
+		return val, 1, nil
+	}
+	val = val[:ix]
+	coeff, ok := units[val[ix:]]
+	if !ok {
+		return "", 0, fmt.Errorf("%s: unit undefined", val[ix:])
+	}
+	return val, coeff, nil
+}
+
+type writer struct {
+	w       *bufio.Writer
+	compact bool
+	depth   int
+}
+
+func createWriter(w io.Writer) *writer {
+	return &writer{
+		w: bufio.NewWriter(w),
+	}
+}
+
+func (w *writer) Write(r io.Reader) error {
+	it, err := Lex(r)
+	if err != nil {
+		return err
+	}
+	for tok, err := range it {
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		err = w.writeToken(tok)
+		if err != nil {
+			return err
+		}
+	}
+	return w.w.Flush()
+}
+
+func (w *writer) writeToken(tok Token) error {
+	var err error
+	switch tok.Type {
+	case TokBegList:
+		err = w.enterList()
+	case TokEndList:
+		err = w.leaveList()
+	case TokComment:
+		err = w.writeComment(tok)
+	case TokString:
+		err = w.writeQuote(tok.Literal)
+	case TokDirective:
+		err = w.writeDirective(tok)
+	case TokVariable:
+		err = w.writeVariable(tok)
+	case TokInvalid:
+	default:
+		err = w.writeAtom(tok)
+	}
+	return err	
+}
+
+func (w *writer) enterList() error {
+	w.w.WriteRune(lparen)
+	w.writeNL()
+	w.depth++
+	return nil
+}
+
+func (w *writer) leaveList() error {
+	w.writeNL()
+	w.w.WriteRune(rparen)
+	w.writeNL()
+	w.depth--
+	return nil
+}
+
+func (w *writer) writeComment(tok Token) error {
+	w.w.WriteRune(semicolon)
+	w.w.WriteRune(space)
+	_, err := w.w.WriteString(tok.Literal)
+	return err
+}
+
+func (w *writer) writeVariable(tok Token) error {
+	w.w.WriteRune(dollar)
+	w.w.WriteRune(lcurly)
+	_, err := w.w.WriteString(tok.Literal)
+	w.w.WriteRune(rcurly)
+	return err
+}
+
+func (w *writer) writeDirective(tok Token) error {
+	w.writeNL()
+	w.w.WriteRune(pound)
+	w.w.WriteRune(bang)
+	w.w.WriteRune(space)
+	_, err := w.w.WriteString(tok.Literal)
+	return err
+}
+
+func (w *writer) writeAtom(tok Token) error {
+	return w.writeString(tok.Literal)
+}
+
+func (w *writer) writeQuote(str string) error {
+	w.w.WriteRune(quote)
+	_, err := w.w.WriteString(str)
+	w.w.WriteRune(quote)
+	return err
+}
+
+func (w *writer) writeString(str string) error {
+	_, err := w.w.WriteString(str)
+	return err
+}
+
+func (w *writer) writeSpace() error {
+	_, err := w.w.WriteRune(space)
+	return err
+}
+
+func (w *writer) writeNL() error {
+	var err error
+	// if !w.compact {
+	// 	_, err = w.w.WriteRune(nl)
+	// }
+	return err
+}
+
+func Format(r io.Reader, w io.Writer, compact bool) error {
+	ws := createWriter(w)
+	ws.compact = compact
+	return ws.Write(r)
 }
 
 type Position struct {
@@ -376,6 +595,12 @@ func Stats(r io.Reader) TokenStats {
 		}
 	}
 	return stat
+}
+
+type ScannerContext struct {
+	File string
+	Line string
+	Position
 }
 
 type Token struct {
@@ -440,10 +665,28 @@ func (t Type) String() string {
 	return str
 }
 
+func (t Type) Atom() bool {
+	switch t {
+	case TokSymbol:
+	case TokString:
+	case TokFloat:
+	case TokInt:
+	case TokBoolean:
+	case TokVariable:
+	case TokDate:
+	case TokDateTime:
+	default:
+		return false
+	}
+	return true
+}
+
 type scanner struct {
-	input *bufio.Reader
-	err   error
-	char  rune
+	file    string
+	input   *bufio.Reader
+	err     error
+	char    rune
+	history *ring
 
 	buf *bytes.Buffer
 	Position
@@ -457,10 +700,7 @@ func Lex(r io.Reader) (iter.Seq2[Token, error], error) {
 	it := func(yield func(Token, error) bool) {
 		for {
 			tok := scan.Scan()
-			if tok.Type == TokEof {
-				break
-			}
-			if errors.Is(scan.Err(), io.EOF) {
+			if tok.Type == TokEof || errors.Is(scan.Err(), io.EOF) {
 				break
 			}
 			if !yield(tok, scan.Err()) {
@@ -474,12 +714,27 @@ func Lex(r io.Reader) (iter.Seq2[Token, error], error) {
 func createScanner(r io.Reader) (*scanner, error) {
 	input := bufio.NewReader(r)
 	s := &scanner{
-		input: input,
-		buf:   new(bytes.Buffer),
+		file:    "stream",
+		input:   input,
+		buf:     new(bytes.Buffer),
+		history: newRing(64),
+	}
+	if n, ok := r.(interface{ Name() string }); ok {
+		s.file = n.Name()
 	}
 	s.Position.Line++
 	s.advance()
 	return s, nil
+}
+
+func (s *scanner) Context() ScannerContext {
+	peek, _ := s.input.Peek(32)
+	ctx := ScannerContext{
+		File:     s.file,
+		Position: s.Position,
+		Line:     s.history.String() + string(peek),
+	}
+	return ctx
 }
 
 func (s *scanner) Err() error {
@@ -618,6 +873,8 @@ func (s *scanner) scanNumber(tok *Token) {
 			s.scanHexa(tok)
 		case 'o', 'O':
 			s.scanOctal(tok)
+		case 'b', 'B':
+			s.scanBinary(tok)
 		default:
 			s.scanDecimal(tok)
 		}
@@ -637,7 +894,7 @@ func (s *scanner) scanHexa(tok *Token) {
 		return
 	}
 	reco := newBaseNumberRecognizer(isHexa)
-	for !s.done() && (isHexa(s.char) || s.char == underscore) {
+	for !s.done() && reco.can() {
 		reco.transition(s.char)
 		if s.char != underscore {
 			s.write()
@@ -658,7 +915,31 @@ func (s *scanner) scanOctal(tok *Token) {
 		return
 	}
 	reco := newBaseNumberRecognizer(isHexa)
-	for !s.done() && (isOctal(s.char) || s.char == underscore) {
+	for !s.done() && reco.can() {
+		reco.transition(s.char)
+		if s.char != underscore {
+			s.write()
+		}
+		s.advance()
+	}
+	tok.Type = TokInt
+	tok.Literal = s.literal()
+	if !reco.valid() {
+		tok.Type = TokInvalid
+	}
+}
+
+func (s *scanner) scanBinary(tok *Token) {
+	s.write()
+	s.advance()
+	s.write()
+	s.advance()
+	if !isBinary(s.char) {
+		tok.Type = TokInvalid
+		return
+	}
+	reco := newBaseNumberRecognizer(isBinary)
+	for !s.done() && reco.can() {
 		reco.transition(s.char)
 		if s.char != underscore {
 			s.write()
@@ -687,11 +968,33 @@ func (s *scanner) scanDecimal(tok *Token) {
 		return isBlank(char) || isComment(char) || isDelim(char)
 	}
 	reco := newDecimalNumberRecognizer(start)
-	for !s.done() && !until(s.char) {
+	for !s.done() && !until(s.char) && reco.can() {
 		reco.transition(s.char)
 		if s.char != underscore {
 			s.write()
 		}
+		s.advance()
+	}
+	if !reco.can() && !s.done() {
+		s.scanDateTime(tok)
+		return
+	}
+	for !s.done() && isLetter(s.char) {
+		s.write()
+		s.advance()
+	}
+	tok.Type = reco.typeOf()
+	tok.Literal = s.literal()
+}
+
+func (s *scanner) scanDateTime(tok *Token) {
+	until := func(char rune) bool {
+		return isBlank(char) || isComment(char) || isDelim(char)
+	}
+	reco := newDateTimeRecognizer(dateTimeStateMonth)
+	for !s.done() && !until(s.char) && reco.can() {
+		reco.transition(s.char)
+		s.write()
 		s.advance()
 	}
 	tok.Type = reco.typeOf()
@@ -724,8 +1027,10 @@ func (s *scanner) advance() {
 		return
 	}
 	s.char = c
+	s.history.Put(s.char)
 	if s.char == cr && s.peek() == nl {
 		s.char, _, _ = s.input.ReadRune()
+		s.history.Put(s.char)
 	}
 
 	if isNL(s.char) {
@@ -776,6 +1081,37 @@ func (s *scanner) skipBlank() {
 	}
 }
 
+type ring struct {
+	runes  []rune
+	offset int
+	count  int
+}
+
+func newRing(size int) *ring {
+	return &ring{
+		runes:  make([]rune, size),
+		offset: 0,
+	}
+}
+
+func (r *ring) String() string {
+	if r.offset == len(r.runes) || r.offset == 0 {
+		return string(r.runes)
+	}
+	if r.count < len(r.runes) {
+		return string(r.runes[:r.count])
+	}
+	return string(r.runes[r.offset:]) + string(r.runes[:r.offset])
+}
+
+func (r *ring) Put(char rune) {
+	r.runes[r.offset] = char
+	r.offset = (r.offset + 1) % len(r.runes)
+	if r.count < len(r.runes) {
+		r.count++
+	}
+}
+
 const (
 	underscore = '_'
 	minus      = '-'
@@ -795,6 +1131,7 @@ const (
 	dollar     = '$'
 	lcurly     = '{'
 	rcurly     = '}'
+	colon      = ':'
 )
 
 func isDelim(r rune) bool {
@@ -823,6 +1160,10 @@ func isComment(r rune) bool {
 
 func isLetter(r rune) bool {
 	return unicode.IsLetter(r)
+}
+
+func isBinary(r rune) bool {
+	return r == '0' || r == '1'
 }
 
 func isHexa(r rune) bool {
@@ -860,7 +1201,188 @@ func isSign(r rune) bool {
 type recognizer interface {
 	transition(rune)
 	valid() bool
+	can() bool
 	typeOf() Type
+}
+
+type dateTimeState uint8
+
+const (
+	dateTimeStateYear dateTimeState = iota
+	dateTimeStateYearNumber
+	dateTimeStateMonth
+	dateTimeStateMonthNumber
+	dateTimeStateDay
+	dateTimeStateDayNumber
+	dateTimeStateHour
+	dateTimeStateHourNumber
+	dateTimeStateMinute
+	dateTimeStateMinuteNumber
+	dateTimeStateSecond
+	dateTimeStateSecondNumber
+	dateTimeStateMillis
+	dateTimeStateMillisNumber
+	dateTimeStateUTC
+	dateTimeStateOffset
+	dateTimeStateOffsetHourNumber
+	dateTimeStateOffsetMinute
+	dateTimeStateOffsetMinuteNumber
+	dateTimeStateInvalid
+)
+
+type dateTimeRecognizer struct {
+	state dateTimeState
+}
+
+func newDateTimeRecognizer(start dateTimeState) recognizer {
+	return &dateTimeRecognizer{
+		state: start,
+	}
+}
+
+func (r *dateTimeRecognizer) can() bool {
+	return r.state != dateTimeStateInvalid
+}
+
+func (r *dateTimeRecognizer) transition(char rune) {
+	switch r.state {
+	case dateTimeStateInvalid:
+	case dateTimeStateYear:
+		if isDigit(char) {
+			r.state = dateTimeStateYearNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateYearNumber:
+		if char == minus {
+			r.state = dateTimeStateMonth
+		} else if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateMonth:
+		if isDigit(char) {
+			r.state = dateTimeStateMonthNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateMonthNumber:
+		if char == minus {
+			r.state = dateTimeStateDay
+		} else if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateDay:
+		if isDigit(char) {
+			r.state = dateTimeStateDayNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateDayNumber:
+		if char == 'T' {
+			r.state = dateTimeStateHour
+		} else if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateHour:
+		if isDigit(char) {
+			r.state = dateTimeStateHourNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateHourNumber:
+		if char == colon {
+			r.state = dateTimeStateMinute
+		} else if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateMinute:
+		if isDigit(char) {
+			r.state = dateTimeStateMinuteNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateMinuteNumber:
+		if char == colon {
+			r.state = dateTimeStateSecond
+		} else if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateSecond:
+		if isDigit(char) {
+			r.state = dateTimeStateSecondNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateSecondNumber:
+		if char == dot {
+			r.state = dateTimeStateMillis
+		} else if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateMillis:
+		if isDigit(char) {
+			r.state = dateTimeStateMillisNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateMillisNumber:
+		if char == 'Z' {
+			r.state = dateTimeStateUTC
+		} else if isSign(char) {
+			r.state = dateTimeStateOffset
+		} else if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateUTC:
+		r.state = dateTimeStateInvalid
+	case dateTimeStateOffset:
+		if isDigit(char) {
+			r.state = dateTimeStateOffsetHourNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateOffsetHourNumber:
+		if char == colon {
+			r.state = dateTimeStateOffsetMinute
+		} else if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateOffsetMinute:
+		if isDigit(char) {
+			r.state = dateTimeStateOffsetMinuteNumber
+		} else {
+			r.state = dateTimeStateInvalid
+		}
+	case dateTimeStateOffsetMinuteNumber:
+		if !isDigit(char) {
+			r.state = dateTimeStateInvalid
+		}
+	}
+}
+
+func (r *dateTimeRecognizer) valid() bool {
+	return r.state == dateTimeStateDayNumber ||
+		r.state == dateTimeStateMinuteNumber ||
+		r.state == dateTimeStateSecondNumber ||
+		r.state == dateTimeStateMillisNumber ||
+		r.state == dateTimeStateUTC ||
+		r.state == dateTimeStateOffsetMinuteNumber
+}
+
+func (r *dateTimeRecognizer) typeOf() Type {
+	switch r.state {
+	default:
+		return TokInvalid
+	case dateTimeStateDayNumber:
+		return TokDate
+	case dateTimeStateMinuteNumber,
+		dateTimeStateSecondNumber,
+		dateTimeStateMillisNumber,
+		dateTimeStateUTC,
+		dateTimeStateOffsetMinuteNumber:
+		return TokDateTime
+	}
+	return 0
 }
 
 type decimalNumberState uint8
@@ -888,6 +1410,10 @@ func newDecimalNumberRecognizer(start decimalNumberState) recognizer {
 	return &decimalNumberRecognizer{
 		state: start,
 	}
+}
+
+func (r *decimalNumberRecognizer) can() bool {
+	return r.state != decimalStateInvalid
 }
 
 func (r *decimalNumberRecognizer) transition(char rune) {
@@ -1010,6 +1536,10 @@ func newBaseNumberRecognizer(accept func(rune) bool) recognizer {
 		state:  baseStateNumber,
 		accept: accept,
 	}
+}
+
+func (r *baseNumberRecognizer) can() bool {
+	return r.state != baseStateInvalid
 }
 
 func (r *baseNumberRecognizer) transition(char rune) {

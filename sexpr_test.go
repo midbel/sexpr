@@ -5,6 +5,182 @@ import (
 	"testing"
 )
 
+func TestScannerDateTime(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		typ   Type
+		value string
+	}{
+		// Dates
+
+		{
+			name:  "date",
+			input: "2026-08-31",
+			typ:   TokDate,
+			value: "2026-08-31",
+		},
+		{
+			name:  "date beginning of year",
+			input: "2026-01-01",
+			typ:   TokDate,
+			value: "2026-01-01",
+		},
+		{
+			name:  "date end of year",
+			input: "2026-12-31",
+			typ:   TokDate,
+			value: "2026-12-31",
+		},
+
+		// Date + time
+
+		{
+			name:  "datetime",
+			input: "2026-08-31T14:30:45.123",
+			typ:   TokDateTime,
+			value: "2026-08-31T14:30:45.123",
+		},
+		{
+			name:  "datetime utc",
+			input: "2026-08-31T14:30:45.123Z",
+			typ:   TokDateTime,
+			value: "2026-08-31T14:30:45.123Z",
+		},
+		{
+			name:  "datetime positive offset",
+			input: "2026-08-31T14:30:45.123+02:00",
+			typ:   TokDateTime,
+			value: "2026-08-31T14:30:45.123+02:00",
+		},
+		{
+			name:  "datetime negative offset",
+			input: "2026-08-31T14:30:45.123-05:00",
+			typ:   TokDateTime,
+			value: "2026-08-31T14:30:45.123-05:00",
+		},
+
+		// Boundary times
+
+		{
+			name:  "midnight",
+			input: "2026-08-31T00:00:00.000Z",
+			typ:   TokDateTime,
+			value: "2026-08-31T00:00:00.000Z",
+		},
+		{
+			name:  "end of day",
+			input: "2026-08-31T23:59:59.999Z",
+			typ:   TokDateTime,
+			value: "2026-08-31T23:59:59.999Z",
+		},
+		{
+			name:  "zero offset",
+			input: "2026-08-31T00:00:00.000+00:00",
+			typ:   TokDateTime,
+			value: "2026-08-31T00:00:00.000+00:00",
+		},
+
+		// Invalid date shape
+
+		{
+			name:  "missing month separator",
+			input: "202608-31",
+			typ:   TokInvalid,
+		},
+		{
+			name:  "wrong date separator",
+			input: "2026/08/31",
+			typ:   TokInvalid,
+		},
+		{
+			name:  "mixed date separators",
+			input: "2026-08/31",
+			typ:   TokInvalid,
+		},
+
+		// Invalid datetime shape
+
+		{
+			name:  "missing T",
+			input: "2026-08-31 14:30:45.123",
+			typ:   TokDate,
+		},
+		{
+			name:  "missing seconds",
+			input: "2026-08-31T14:30.123",
+			typ:   TokInvalid,
+		},
+		{
+			name:  "missing milliseconds",
+			input: "2026-08-31T14:30:45",
+			typ:   TokDateTime,
+		},
+		{
+			name:  "short milliseconds",
+			input: "2026-08-31T14:30:45.12",
+			typ:   TokDateTime,
+		},
+		{
+			name:  "long milliseconds",
+			input: "2026-08-31T14:30:45.1234",
+			typ:   TokDateTime,
+		},
+
+		// Invalid timezone
+
+		{
+			name:  "invalid timezone",
+			input: "2026-08-31T14:30:45.123X",
+			typ:   TokInvalid,
+		},
+		{
+			name:  "missing offset minute",
+			input: "2026-08-31T14:30:45.123+02",
+			typ:   TokInvalid,
+		},
+		{
+			name:  "offset without sign",
+			input: "2026-08-31T14:30:45.12302:00",
+			typ:   TokInvalid,
+		},
+
+		// Number/date boundary
+
+		{
+			name:  "integer is not date",
+			input: "1280",
+			typ:   TokInt,
+			value: "1280",
+		},
+		{
+			name:  "date after integer",
+			input: "42 2026-08-31",
+			typ:   TokInt,
+			value: "42",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scan, err := createScanner(strings.NewReader(tt.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			tok := scan.Scan()
+
+			if tok.Type != tt.typ {
+				t.Errorf("type (%s): got %s, want %s", tt.input, tok.Type, tt.typ)
+			}
+
+			if tt.value != "" && tok.Literal != tt.value {
+				t.Errorf("literal (%s): got %q, want %q", tt.input, tok.Literal, tt.value)
+			}
+		})
+	}
+}
+
 func TestScannerAtoms(t *testing.T) {
 	tests := []struct {
 		name  string

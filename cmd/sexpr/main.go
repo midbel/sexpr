@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 
@@ -37,6 +38,70 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+var fmtCmd = cli.Command{
+	Name:    "format",
+	Alias:   []string{"fmt"},
+	Summary: "",
+	Usage:   "format <file> <output>",
+	Handler: &formatCommand{},
+}
+
+type formatCommand struct {
+	Compact bool
+}
+
+func (c formatCommand) Run(args []string) error {
+	set := cli.NewFlagSet("format")
+	set.BoolVar(&c.Compact, "c", false, "compact output")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if set.NArg() != 1 {
+		return cli.ErrUsage
+	}
+	r, err := os.Open(set.Arg(0))
+	if err != nil {
+		cli.FailIO(err)
+	}
+	defer r.Close()
+
+	var out io.Writer = cli.Stdout
+	if set.NArg() == 2 {
+		w, err := os.Create(set.Arg(1))
+		if err != nil {
+			cli.FailIO(err)
+		}
+		defer w.Close()
+		out = w
+	}
+	return sexpr.Format(r, out, c.Compact)
+}
+
+var diffCmd = cli.Command{
+	Name:    "diff",
+	Summary: "",
+	Usage:   "diff <file>",
+	Handler: &diffCommand{},
+}
+
+type diffCommand struct{}
+
+func (c diffCommand) Run(args []string) error {
+	set := cli.NewFlagSet("diff")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if set.NArg() != 1 {
+		return cli.ErrUsage
+	}
+	r, err := os.Open(set.Arg(0))
+	if err != nil {
+		cli.FailIO(err)
+	}
+	defer r.Close()
+	return nil
 }
 
 var statsCmd = cli.Command{
@@ -81,16 +146,17 @@ func (c statsCommand) Run(args []string) error {
 }
 
 var scanCmd = cli.Command{
-	Name:    "scan",
+	Name:    "tokenize",
+	Alias:   []string{"lex", "scan"},
 	Summary: "",
-	Usage:   "scan <file>",
+	Usage:   "tokenize <file>",
 	Handler: &scanCommand{},
 }
 
 type scanCommand struct{}
 
 func (c scanCommand) Run(args []string) error {
-	set := cli.NewFlagSet("scan")
+	set := cli.NewFlagSet("tokenize")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -119,8 +185,10 @@ func (c scanCommand) Run(args []string) error {
 
 func prepare() *cli.CommandTrie {
 	root := cli.New()
-	root.Register(single("scan"), &scanCmd)
+	root.Register(single("tokenize"), &scanCmd)
 	root.Register(single("stats"), &statsCmd)
+	root.Register(single("format"), &fmtCmd)
+	root.Register(single("diff"), &diffCmd)
 	return root
 }
 
