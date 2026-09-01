@@ -412,129 +412,221 @@ func splitUnit(val string) (string, float64, error) {
 	return val, coeff, nil
 }
 
+const defaultIndentSize = 2
+
 type writer struct {
-	w       *bufio.Writer
+	out     *bufio.Writer
+	scan    *scanner
 	compact bool
+	step    int
 	depth   int
+
+	prevLine int
+	curr     Token
+	peek     Token
 }
 
-func createWriter(w io.Writer) *writer {
-	return &writer{
-		w: bufio.NewWriter(w),
+func createWriter(r io.Reader, w io.Writer) *writer {
+	scan, _ := createScanner(r)
+	ws := &writer{
+		out:  bufio.NewWriter(w),
+		scan: scan,
+		step: defaultIndentSize,
 	}
+	ws.next()
+	ws.next()
+
+	return ws
 }
 
-func (w *writer) Write(r io.Reader) error {
-	it, err := Lex(r)
-	if err != nil {
-		return err
-	}
-	for tok, err := range it {
-		if err != nil && !errors.Is(err, io.EOF) {
+func (w *writer) Write() error {
+	for !w.done() {
+		if err := w.writeToken(); err != nil {
 			return err
 		}
-		err = w.writeToken(tok)
-		if err != nil {
-			return err
-		}
 	}
-	return w.w.Flush()
+	return w.out.Flush()
 }
 
-func (w *writer) writeToken(tok Token) error {
+func (w *writer) writeToken() error {
 	var err error
-	switch tok.Type {
+	switch w.curr.Type {
 	case TokBegList:
 		err = w.enterList()
+		w.writeAfterBegList()
 	case TokEndList:
 		err = w.leaveList()
+		w.writeAfterEndList()
 	case TokComment:
-		err = w.writeComment(tok)
+		if w.compact {
+			break
+		}
+		err = w.writeComment()
+		w.writeAfterComment()
 	case TokString:
-		err = w.writeQuote(tok.Literal)
+		err = w.writeQuote()
+		w.writeAfterAtom()
 	case TokDirective:
-		err = w.writeDirective(tok)
+		if w.compact {
+			break
+		}
+		err = w.writeDirective()
 	case TokVariable:
-		err = w.writeVariable(tok)
+		err = w.writeVariable()
+		w.writeAfterAtom()
 	case TokInvalid:
 	default:
-		err = w.writeAtom(tok)
+		err = w.writeAtom()
+		w.writeAfterAtom()
 	}
-	return err	
+	return err
 }
 
 func (w *writer) enterList() error {
-	w.w.WriteRune(lparen)
-	w.writeNL()
-	w.depth++
+	w.next()
+	w.out.WriteRune(lparen)
+	w.depth += w.step
 	return nil
 }
 
 func (w *writer) leaveList() error {
-	w.writeNL()
-	w.w.WriteRune(rparen)
-	w.writeNL()
-	w.depth--
+	w.next()
+	w.out.WriteRune(rparen)
+	w.depth -= w.step
 	return nil
 }
 
-func (w *writer) writeComment(tok Token) error {
-	w.w.WriteRune(semicolon)
-	w.w.WriteRune(space)
-	_, err := w.w.WriteString(tok.Literal)
+func (w *writer) writeComment() error {
+	defer w.next()
+	w.out.WriteRune(semicolon)
+	w.out.WriteRune(space)
+	_, err := w.out.WriteString(w.curr.Literal)
 	return err
 }
 
-func (w *writer) writeVariable(tok Token) error {
-	w.w.WriteRune(dollar)
-	w.w.WriteRune(lcurly)
-	_, err := w.w.WriteString(tok.Literal)
-	w.w.WriteRune(rcurly)
+func (w *writer) writeVariable() error {
+	defer w.next()
+
+	w.out.WriteRune(dollar)
+	w.out.WriteRune(lcurly)
+	_, err := w.out.WriteString(w.curr.Literal)
+	w.out.WriteRune(rcurly)
 	return err
 }
 
-func (w *writer) writeDirective(tok Token) error {
-	w.writeNL()
-	w.w.WriteRune(pound)
-	w.w.WriteRune(bang)
-	w.w.WriteRune(space)
-	_, err := w.w.WriteString(tok.Literal)
+func (w *writer) writeDirective() error {
+	defer w.next()
+
+	w.out.WriteRune(pound)
+	w.out.WriteRune(bang)
+	w.out.WriteRune(space)
+	_, err := w.out.WriteString(w.curr.Literal)
 	return err
 }
 
-func (w *writer) writeAtom(tok Token) error {
-	return w.writeString(tok.Literal)
+func (w *writer) writeAtom() error {
+	defer w.next()
+	return w.writeString(w.curr.Literal)
 }
 
-func (w *writer) writeQuote(str string) error {
-	w.w.WriteRune(quote)
-	_, err := w.w.WriteString(str)
-	w.w.WriteRune(quote)
+func (w *writer) writeQuote() error {
+	w.out.WriteRune(quote)
+	_, err := w.out.WriteString(w.curr.Literal)
+	w.out.WriteRune(quote)
+	w.next()
+	w.writeAfterAtom()
 	return err
 }
 
 func (w *writer) writeString(str string) error {
-	_, err := w.w.WriteString(str)
+	_, err := w.out.WriteString(str)
 	return err
 }
 
 func (w *writer) writeSpace() error {
-	_, err := w.w.WriteRune(space)
+	_, err := w.out.WriteRune(space)
 	return err
 }
 
 func (w *writer) writeNL() error {
-	var err error
-	// if !w.compact {
-	// 	_, err = w.w.WriteRune(nl)
-	// }
+	char := nl
+	if w.compact {
+		char = space
+	}
+	_, err := w.out.WriteRune(char)
 	return err
 }
 
+func (w *writer) writeIndent() {
+	if w.compact {
+		return
+	}
+	for range w.depth {
+		w.writeSpace()
+	}
+}
+
+func (w *writer) writeAfterComment() {
+	if w.curr.Type == TokEndList {
+		w.depth--
+	}
+	w.writeNL()
+	w.writeIndent()
+}
+
+func (w *writer) writeAfterBegList() {
+	switch {
+	case w.curr.Type.Atom():
+	case w.curr.Type == TokEndList:
+	case w.curr.Type == TokBegList || w.curr.Type == TokComment:
+		w.writeNL()
+		w.writeIndent()
+	}
+}
+
+func (w *writer) writeAfterEndList() {
+	switch {
+	case w.curr.Type.Atom():
+		w.writeSpace()
+	case w.curr.Type.Comment():
+		if w.prevLine == w.curr.Line {
+			w.writeSpace()
+		} else {
+			w.writeNL()
+		}
+	case w.curr.Type == TokBegList:
+		w.writeNL()
+		w.writeIndent()
+	case w.curr.Type == TokEndList:
+	}
+}
+
+func (w *writer) writeAfterAtom() {
+	switch {
+	case w.curr.Type.Atom() || w.curr.Type.Comment():
+		w.writeSpace()
+	case w.curr.Type == TokBegList:
+		w.writeNL()
+		w.writeIndent()
+	case w.curr.Type == TokEndList:
+	}
+}
+
+func (w *writer) next() {
+	w.prevLine = w.curr.Line
+
+	w.curr = w.peek
+	w.peek = w.scan.Scan()
+}
+
+func (w *writer) done() bool {
+	return w.curr.Type == TokEof
+}
+
 func Format(r io.Reader, w io.Writer, compact bool) error {
-	ws := createWriter(w)
+	ws := createWriter(r, w)
 	ws.compact = compact
-	return ws.Write(r)
+	return ws.Write()
 }
 
 type Position struct {
@@ -663,6 +755,10 @@ func (t Type) String() string {
 		str = "?"
 	}
 	return str
+}
+
+func (t Type) Comment() bool {
+	return t == TokComment
 }
 
 func (t Type) Atom() bool {
