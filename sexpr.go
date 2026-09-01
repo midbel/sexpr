@@ -593,6 +593,7 @@ func (w *writer) writeAfterEndList() {
 			w.writeSpace()
 		} else {
 			w.writeNL()
+			w.writeIndent()
 		}
 	case w.curr.Type == TokBegList:
 		w.writeNL()
@@ -603,8 +604,15 @@ func (w *writer) writeAfterEndList() {
 
 func (w *writer) writeAfterAtom() {
 	switch {
-	case w.curr.Type.Atom() || w.curr.Type.Comment():
+	case w.curr.Type.Atom():
 		w.writeSpace()
+	case w.curr.Type.Comment():
+		if w.prevLine == w.curr.Line {
+			w.curr.Type.Comment()
+		} else {
+			w.writeNL()
+			w.writeIndent()
+		}
 	case w.curr.Type == TokBegList:
 		w.writeNL()
 		w.writeIndent()
